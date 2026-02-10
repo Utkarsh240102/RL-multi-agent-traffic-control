@@ -281,8 +281,17 @@ def main(args):
             epsilon_min=0.01
         )
         
-        # Load Episode 900 weights if available
-        if os.path.exists(args.pretrained_model):
+        # Load weights: fine-tuned individual models OR shared pretrained model
+        if args.load_finetuned:
+            # Load individual fine-tuned models
+            finetuned_path = f'checkpoints_multiagent/{tls}_final.pth'
+            if os.path.exists(finetuned_path):
+                agents[tls].load(finetuned_path)
+                print(f"  ✓ {tls}: Loaded fine-tuned model {finetuned_path}")
+            else:
+                print(f"  ⚠ {tls}: Fine-tuned model not found at {finetuned_path}")
+        elif os.path.exists(args.pretrained_model):
+            # Load shared pretrained model (like Episode 900)
             agents[tls].load(args.pretrained_model)
             print(f"  ✓ {tls}: Loaded {args.pretrained_model}")
         else:
@@ -319,6 +328,8 @@ if __name__ == '__main__':
                        help='Enable cooperation (shared observations and rewards)')
     parser.add_argument('--pretrained-model', type=str, default='checkpoints/ddqn_episode_900.pth',
                        help='Path to pretrained single-agent model')
+    parser.add_argument('--load-finetuned', action='store_true',
+                       help='Load fine-tuned models from checkpoints_multiagent/ (ignores --pretrained-model)')
     parser.add_argument('--test-episodes', type=int, default=10,
                        help='Number of episodes for transfer test')
     parser.add_argument('--episodes', type=int, default=100,
