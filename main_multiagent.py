@@ -106,12 +106,22 @@ def test_transfer(env, agents, num_episodes=10):
     return results
 
 
-def fine_tune(env, agents, num_episodes=100, target_update_freq=10, save_freq=20):
+def fine_tune(env, agents, num_episodes=100, target_update_freq=10, save_freq=20, cooperative=False, resume_from=0):
     """
-    Fine-tune agents starting from Episode 900 weights
+    Train/fine-tune agents for multi-agent system
     """
+    mode_name = "COOPERATIVE" if cooperative else "INDEPENDENT"
+    checkpoint_dir = 'checkpoints_cooperative' if cooperative else 'checkpoints_multiagent'
+    history_file = 'results_cooperative/training_history.csv' if cooperative else 'results_multiagent/training_history.csv'
+    
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs('results_cooperative' if cooperative else 'results_multiagent', exist_ok=True)
+    
     print("\n" + "="*70)
-    print(f"FINE-TUNING: {num_episodes} Episodes")
+    if resume_from > 0:
+        print(f"{mode_name} TRAINING: Episodes {resume_from+1}-{resume_from+num_episodes} (Resuming)")
+    else:
+        print(f"{mode_name} TRAINING: {num_episodes} Episodes")
     print("="*70)
     
     training_history = {
@@ -119,7 +129,8 @@ def fine_tune(env, agents, num_episodes=100, target_update_freq=10, save_freq=20
         'per_intersection': {tls: [] for tls in env.tls_ids}
     }
     
-    for episode in tqdm(range(num_episodes), desc="Fine-Tuning"):
+    for episode in tqdm(range(num_episodes), desc="Training"):
+        actual_episode = resume_from + episode + 1  # Actual episode number for saving
         states = env.reset()
         episode_reward = {tls: 0 for tls in env.tls_ids}
         done = False
@@ -164,23 +175,23 @@ def fine_tune(env, agents, num_episodes=100, target_update_freq=10, save_freq=20
         # Save checkpoints
         if (episode + 1) % save_freq == 0:
             for tls in env.tls_ids:
-                agents[tls].save(f'checkpoints_multiagent/{tls}_episode_{episode+1}.pth')
-            print(f"\n✓ Checkpoint saved at episode {episode+1}")
+                agents[tls].save(f'{checkpoint_dir}/{tls}_episode_{actual_episode}.pth')
+            print(f"\n✓ Checkpoint saved at episode {actual_episode}")
     
     env.close()
     
     # Save final models
     for tls in env.tls_ids:
-        agents[tls].save(f'checkpoints_multiagent/{tls}_final.pth')
+        agents[tls].save(f'{checkpoint_dir}/{tls}_final.pth')
     
     # Save training history
     df = pd.DataFrame(training_history['episode_rewards'], columns=['Network_Reward'])
     for tls in env.tls_ids:
         df[tls] = training_history['per_intersection'][tls]
-    df.to_csv('results_multiagent/training_history.csv', index=False)
+    df.to_csv(history_file, index=False)
     
-    print("\n✅ Fine-tuning complete!")
-    print(f"Final models saved in: checkpoints_multiagent/")
+    print("\n✅ Training complete!")
+    print(f"Final models saved in: {checkpoint_dir}/")
     
     return training_history
 
@@ -281,10 +292,33 @@ def main(args):
             epsilon_min=0.01
         )
         
-        # Load weights: fine-tuned individual models OR shared pretrained model
-        if args.load_finetuned:
-            # Load individual fine-tuned models
-            finetuned_path = f'checkpoints_multiagent/{tls}_final.pth'
+        # Load weights: resume, fine-tuned, or pretrained model
+        # Skip loading if cooperative (dimension mismatch: 6 vs 8 features)
+        if args.resume_from > 0:
+            # Resume from specific episode checkpoint
+            if args.cooperative:
+                resume_path = f'checkpoints_cooperative/{tls}_episode_{args.resume_from}.pth'
+            else:
+                resume_path = f'checkpoints_multiagent/{tls}_episode_{args.resume_from}.pth'
+            
+            if os.path.exists(resume_path):
+                agents[tls].load(resume_path)
+                # Adjust epsilon to the value it would have at this episode
+                decay_factor = 0.995 ** args.resume_from
+                agents[tls].epsilon = max(args.epsilon * decay_factor, agents[tls].epsilon_min)
+                print(f"  ✓ {tls}: Resumed from episode {args.resume_from} (epsilon: {agents[tls].epsilon:.4f})")
+            else:
+                print(f"  ❌ {tls}: Resume checkpoint not found at {resume_path}")
+                return
+        elif args.cooperative and not args.load_finetuned:
+            print(f"  ⚠ {tls}: Cooperative mode - starting with random weights (can't use 6-feature pretrained model)")
+        elif args.load_finetuned:
+            # Load individual fine-tuned models (check cooperative dir first, then independent)
+            if args.cooperative:
+                finetuned_path = f'checkpoints_cooperative/{tls}_final.pth'
+            else:
+                finetuned_path = f'checkpoints_multiagent/{tls}_final.pth'
+            
             if os.path.exists(finetuned_path):
                 agents[tls].load(finetuned_path)
                 print(f"  ✓ {tls}: Loaded fine-tuned model {finetuned_path}")
@@ -297,17 +331,19 @@ def main(args):
         else:
             print(f"  ⚠ {tls}: Starting with random weights")
     
-    # Phase 0: Test transfer (if using pretrained)
+    # Phase 0: Test transfer (if using pretrained and not cooperative)
     if args.mode == 'test' or args.mode == 'all':
-        if os.path.exists(args.pretrained_model):
+        if args.cooperative:
+            print("\n⚠ Cooperative mode - skipping transfer test (dimension mismatch with pretrained model)")
+        elif os.path.exists(args.pretrained_model):
             test_results = test_transfer(env, agents, num_episodes=args.test_episodes)
         else:
             print("\n⚠ No pretrained model found. Skipping transfer test.")
             test_results = {'strategy': 'scratch'}
     
-    # Phase 1: Fine-tune (if requested)
+    # Phase 1: Train (if requested)
     if args.mode == 'train' or args.mode == 'all':
-        fine_tune(env, agents, num_episodes=args.episodes, target_update_freq=10, save_freq=20)
+        fine_tune(env, agents, num_episodes=args.episodes, target_update_freq=10, save_freq=20, cooperative=args.cooperative, resume_from=args.resume_from)
     
     # Phase 2: Evaluate
     if args.mode == 'evaluate' or args.mode == 'all':
@@ -330,6 +366,8 @@ if __name__ == '__main__':
                        help='Path to pretrained single-agent model')
     parser.add_argument('--load-finetuned', action='store_true',
                        help='Load fine-tuned models from checkpoints_multiagent/ (ignores --pretrained-model)')
+    parser.add_argument('--resume-from', type=int, default=0,
+                       help='Resume training from episode checkpoint (e.g., 380)')
     parser.add_argument('--test-episodes', type=int, default=10,
                        help='Number of episodes for transfer test')
     parser.add_argument('--episodes', type=int, default=100,
